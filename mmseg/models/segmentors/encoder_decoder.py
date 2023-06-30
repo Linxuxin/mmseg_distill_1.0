@@ -71,14 +71,22 @@ class EncoderDecoder(BaseSegmentor):
     def encode_decode(self, img, img_metas):
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input."""
+        fea = None
         x = self.extract_feat(img)
         out = self._decode_head_forward_test(x, img_metas)
+        if isinstance(out, list):
+            fea = out[1]
+            out = out[0]
+
         out = resize(
             input=out,
             size=img.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
-        return out
+
+        # return out, x[-1]
+        return out, fea
+        # return out
 
     def _decode_head_forward_train(self, x, img_metas, gt_semantic_seg):
         """Run forward function and calculate loss for decode head in
@@ -204,7 +212,8 @@ class EncoderDecoder(BaseSegmentor):
     def whole_inference(self, img, img_meta, rescale):
         """Inference with full image."""
 
-        seg_logit = self.encode_decode(img, img_meta)
+        seg_logit, fea = self.encode_decode(img, img_meta)
+        # seg_logit = self.encode_decode(img, img_meta)
         if rescale:
             # support dynamic shape for onnx
             if torch.onnx.is_in_onnx_export():
@@ -221,7 +230,8 @@ class EncoderDecoder(BaseSegmentor):
                 align_corners=self.align_corners,
                 warning=False)
 
-        return seg_logit
+        return seg_logit, fea
+        # return seg_logit
 
     def inference(self, img, img_meta, rescale):
         """Inference with slide/whole style.
@@ -245,7 +255,8 @@ class EncoderDecoder(BaseSegmentor):
         if self.test_cfg.mode == 'slide':
             seg_logit = self.slide_inference(img, img_meta, rescale)
         else:
-            seg_logit = self.whole_inference(img, img_meta, rescale)
+            seg_logit, fea = self.whole_inference(img, img_meta, rescale)
+            # seg_logit = self.whole_inference(img, img_meta, rescale)
         if self.out_channels == 1:
             output = F.sigmoid(seg_logit)
         else:
@@ -259,11 +270,13 @@ class EncoderDecoder(BaseSegmentor):
             elif flip_direction == 'vertical':
                 output = output.flip(dims=(2, ))
 
-        return output
+        return output, fea
+        # return output
 
     def simple_test(self, img, img_meta, rescale=True):
         """Simple test with single image."""
-        seg_logit = self.inference(img, img_meta, rescale)
+        seg_logit, fea = self.inference(img, img_meta, rescale)
+        # seg_logit = self.inference(img, img_meta, rescale)
         if self.out_channels == 1:
             seg_pred = (seg_logit >
                         self.decode_head.threshold).to(seg_logit).squeeze(1)
@@ -276,7 +289,8 @@ class EncoderDecoder(BaseSegmentor):
         seg_pred = seg_pred.cpu().numpy()
         # unravel batch dim
         seg_pred = list(seg_pred)
-        return seg_pred
+        # return seg_pred
+        return seg_pred, fea
 
     def simple_test_logits(self, img, img_metas, rescale=True):
         """Test without augmentations.

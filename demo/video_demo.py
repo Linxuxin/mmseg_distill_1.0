@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from argparse import ArgumentParser
 
+from os import listdir
 import cv2
 
 from mmseg.apis import inference_segmentor, init_segmentor
@@ -50,6 +51,11 @@ def main():
 
     assert args.show or args.output_file, \
         'At least one output should be enabled.'
+
+    # path = '/data/hwzheng/Downloads/leftImg8bit/demoVideo/stuttgart_02/'
+    # frames = [img for img in get_image_paths(path) if img.endswith('.png')]
+    #
+    # convert_to_video(frames, '/data/hwzheng/mmsegmentation/original_video2.mp4')
 
     # build the model from a config file and a checkpoint file
     model = init_segmentor(args.config, args.checkpoint, device=args.device)
@@ -106,6 +112,22 @@ def main():
         if writer:
             writer.release()
         cap.release()
+
+
+def get_image_paths(dir):
+    return sorted([dir + path for path in listdir(dir)])
+
+
+def convert_to_video(image_paths, video_name):
+    frame = cv2.imread(image_paths[0])
+    height, width, layer = frame.shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    video = cv2.VideoWriter(video_name, fourcc, 30, (width, height))
+    for image in image_paths:
+        video.write(cv2.imread(image))
+
+    cv2.destroyAllWindows()
+    video.release()
 
 
 if __name__ == '__main__':

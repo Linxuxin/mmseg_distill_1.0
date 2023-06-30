@@ -1,21 +1,18 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os
 import random
 import warnings
 
-import mmcv
 import numpy as np
 import torch
 import torch.distributed as dist
-from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
-                         build_runner, get_dist_info)
+from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
+from mmcv.runner import HOOKS, build_optimizer, build_runner, get_dist_info
 from mmcv.utils import build_from_cfg
 
-from mmseg import digit_version
-from mmseg.core import DistEvalHook, EvalHook, build_optimizer
+from mmseg.core import DistEvalHook, EvalHook
+from mmseg.core.optimizers import build_optimizers
 from mmseg.datasets import build_dataloader, build_dataset
-from mmseg.utils import (build_ddp, build_dp, find_latest_checkpoint,
-                         get_root_logger)
+from mmseg.utils import get_root_logger
 
 
 def init_random_seed(seed=None, device='cuda'):
@@ -80,45 +77,48 @@ def train_segmentor(model,
 
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
-    # The default loader config
-    loader_cfg = dict(
-        # cfg.gpus will be ignored if distributed
-        num_gpus=len(cfg.gpu_ids),
-        dist=distributed,
-        seed=cfg.seed,
-        drop_last=True)
-    # The overall dataloader settings
-    loader_cfg.update({
-        k: v
-        for k, v in cfg.data.items() if k not in [
-            'train', 'val', 'test', 'train_dataloader', 'val_dataloader',
-            'test_dataloader'
-        ]
-    })
+    data_loaders = [
+        build_dataloader(
+            ds,
+            cfg.data.samples_per_gpu,
+            cfg.data.workers_per_gpu,
+            # cfg.gpus will be ignored if distributed
+            len(cfg.gpu_ids),
+            dist=distributed,
+            seed=cfg.seed,
+            drop_last=True) for ds in dataset
+    ]
 
-    # The specific dataloader settings
-    train_loader_cfg = {**loader_cfg, **cfg.data.get('train_dataloader', {})}
-    data_loaders = [build_dataloader(ds, **train_loader_cfg) for ds in dataset]
-
-    # put model on devices
+    # put model on gpus
     if distributed:
         find_unused_parameters = cfg.get('find_unused_parameters', False)
         # Sets the `find_unused_parameters` parameter in
-        # DDP wrapper
-        model = build_ddp(
-            model,
-            cfg.device,
-            device_ids=[int(os.environ['LOCAL_RANK'])],
+        # torch.nn.parallel.DistributedDataParallel
+        model = MMDistributedDataParallel(
+            model.cuda(),
+            device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=find_unused_parameters)
     else:
-        if not torch.cuda.is_available():
-            assert digit_version(mmcv.__version__) >= digit_version('1.4.4'), \
-                'Please use MMCV >= 1.4.4 for CPU training!'
-        model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
+        model = MMDataParallel(
+            model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
 
     # build runner
-    optimizer = build_optimizer(model, cfg.optimizer)
+    distiller_cfg = cfg.get('distiller', None)
+    D_model_optim_cfg = cfg.optimizer.get('D_model', None)
+    if distiller_cfg is None:
+        optimizer = build_optimizer(model, cfg.optimizer)
+    else:
+        if D_model_optim_cfg is not None:
+            D_optimizer = build_optimizer(model.module.D_model_parameters(), D_model_optim_cfg)
+            model_optimizer = build_optimizer(model.module.base_parameters(), cfg.optimizer['model'])
+            optimizer = dict(
+                model=model_optimizer,
+                D_model=D_optimizer,
+            )
+        else:
+            optimizer = build_optimizer(model.module.base_parameters(), cfg.optimizer)
+
 
     if cfg.get('runner') is None:
         cfg.runner = {'type': 'IterBasedRunner', 'max_iters': cfg.total_iters}
@@ -140,12 +140,6 @@ def train_segmentor(model,
     runner.register_training_hooks(cfg.lr_config, cfg.optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config,
                                    cfg.get('momentum_config', None))
-    if distributed:
-        # when distributed training by epoch, using`DistSamplerSeedHook` to set
-        # the different seed to distributed sampler for each epoch, it will
-        # shuffle dataset at each epoch and avoid overfitting.
-        if isinstance(runner, EpochBasedRunner):
-            runner.register_hook(DistSamplerSeedHook())
 
     # an ugly walkaround to make the .log and .log.json filenames the same
     runner.timestamp = timestamp
@@ -153,14 +147,12 @@ def train_segmentor(model,
     # register eval hooks
     if validate:
         val_dataset = build_dataset(cfg.data.val, dict(test_mode=True))
-        # The specific dataloader settings
-        val_loader_cfg = {
-            **loader_cfg,
-            'samples_per_gpu': 1,
-            'shuffle': False,  # Not shuffle by default
-            **cfg.data.get('val_dataloader', {}),
-        }
-        val_dataloader = build_dataloader(val_dataset, **val_loader_cfg)
+        val_dataloader = build_dataloader(
+            val_dataset,
+            samples_per_gpu=1,
+            workers_per_gpu=cfg.data.workers_per_gpu,
+            dist=distributed,
+            shuffle=False)
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_hook = DistEvalHook if distributed else EvalHook
@@ -183,10 +175,6 @@ def train_segmentor(model,
             hook = build_from_cfg(hook_cfg, HOOKS)
             runner.register_hook(hook, priority=priority)
 
-    if cfg.resume_from is None and cfg.get('auto_resume'):
-        resume_from = find_latest_checkpoint(cfg.work_dir)
-        if resume_from is not None:
-            cfg.resume_from = resume_from
     if cfg.resume_from:
         runner.resume(cfg.resume_from)
     elif cfg.load_from:

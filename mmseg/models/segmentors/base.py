@@ -89,7 +89,10 @@ class BaseSegmentor(BaseModule, metaclass=ABCMeta):
             assert all(shape == pad_shapes[0] for shape in pad_shapes)
 
         if num_augs == 1:
-            return self.simple_test(imgs[0], img_metas[0], **kwargs)
+            out = self.simple_test(imgs[0], img_metas[0], **kwargs)
+            # fea = self.simple_test(imgs[0], img_metas[0], **kwargs)[1]
+            return out[0], out[1]
+            # return self.simple_test(imgs[0], img_metas[0], **kwargs)
         else:
             return self.aug_test(imgs, img_metas, **kwargs)
 
@@ -107,9 +110,15 @@ class BaseSegmentor(BaseModule, metaclass=ABCMeta):
         if return_loss:
             return self.forward_train(img, img_metas, **kwargs)
         else:
-            return self.forward_test(img, img_metas, **kwargs)
+            out = self.forward_test(img, img_metas, **kwargs)
+            return out[0], out[1]
+            # output = self.forward_test(img, img_metas, **kwargs)[0]
+            # fea = self.forward_test(img, img_metas, **kwargs)[1]
+            # return output, fea
+            # return self.forward_test(img, img_metas, **kwargs)
 
-    def train_step(self, data_batch, optimizer, **kwargs):
+
+    def train_step(self, data_batch, optimizer, iter, **kwargs):
         """The iteration step during training.
 
         This method defines an iteration step during training, except for the
@@ -135,11 +144,16 @@ class BaseSegmentor(BaseModule, metaclass=ABCMeta):
                 DDP, it means the batch size on each GPU), which is used for
                 averaging the logs.
         """
-        losses = self(**data_batch)
+        self.iter = iter
+        losses, adv_loss, other_dict = self(**data_batch)
+        # losses = self(**data_batch)
         loss, log_vars = self._parse_losses(losses)
+        log_vars.update(other_dict)
+        # log_vars.update(dict(adv_loss=adv_loss.item()))
 
         outputs = dict(
             loss=loss,
+            adv_loss=adv_loss,
             log_vars=log_vars,
             num_samples=len(data_batch['img_metas']))
 

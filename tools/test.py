@@ -270,7 +270,8 @@ def main():
                 'Please use MMCV >= 1.4.4 for CPU training!'
         model = revert_sync_batchnorm(model)
         model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
-        results = single_gpu_test(
+        results, overall_embeddings, overall_labels = single_gpu_test(
+        # results = single_gpu_test(
             model,
             data_loader,
             args.show,

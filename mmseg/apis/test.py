@@ -9,6 +9,7 @@ import torch
 from mmcv.engine import collect_results_cpu, collect_results_gpu
 from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
+import torch.nn.functional as F
 
 
 def np2tmp(array, temp_file_name=None, tmpdir=None):
@@ -86,9 +87,38 @@ def single_gpu_test(model,
     # we use batch_sampler to get correct data idx
     loader_indices = data_loader.batch_sampler
 
+    overall_embeddings = []
+    overall_labels = []
     for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, **data)
+            result, fea = model(return_loss=False, **data)
+            # result = model(return_loss=False, **data)
+
+        idx = batch_indices[0]
+        if idx == 50:
+            break
+
+        embeddings = fea
+        B, C, H, W = embeddings.size()
+        embeddings = embeddings.permute(0, 2, 3, 1)
+        embeddings = embeddings.contiguous().view(-1, embeddings.shape[-1])
+
+        ann_info = dataset.img_infos[idx]['ann']
+        gt = dict(ann_info=ann_info)
+        dataset.pre_pipeline(gt)
+        gt = dataset.gt_seg_map_loader(gt)
+        labels = gt['gt_semantic_seg']
+        labels = torch.from_numpy(labels)
+        labels = F.interpolate(labels.unsqueeze(0).unsqueeze(1), (H, W), mode='nearest')
+        labels = labels.permute(0, 2, 3, 1)
+        labels = labels.contiguous().view(-1, 1)
+
+        index_1 = (~(labels == -1)).squeeze(-1)
+        embeddings = embeddings[index_1]
+        labels = labels[index_1]
+
+        overall_embeddings.append(embeddings)
+        overall_labels.append(labels)
 
         if show or out_dir:
             img_tensor = data['img'][0]
@@ -133,6 +163,19 @@ def single_gpu_test(model,
         batch_size = len(result)
         for _ in range(batch_size):
             prog_bar.update()
+
+    overall_embeddings = torch.cat(overall_embeddings, dim=0)
+    overall_labels = torch.cat(overall_labels, dim=0)
+
+    print('overall_embeddings', overall_embeddings.size())
+    print('overall_labels', overall_labels.size())
+
+    overall_embeddings = overall_embeddings.cpu().numpy()
+    overall_labels = overall_labels.cpu().numpy()
+
+    import numpy as np
+    np.save('seg_embeddings.npy', overall_embeddings)
+    np.save('seg_labels.npy', overall_labels)
 
     return results
 
@@ -205,7 +248,7 @@ def multi_gpu_test(model,
 
     for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            result, _ = model(return_loss=False, rescale=True, **data)
 
         if efficient_test:
             result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
